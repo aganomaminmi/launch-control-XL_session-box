@@ -3,14 +3,14 @@ import Live
 from _Framework.ControlSurface import ControlSurface
 from _Framework.SessionComponent import SessionComponent
 from _Framework.MixerComponent import MixerComponent
+from _Framework.DeviceComponent import DeviceComponent
 from _Framework.ButtonElement import ButtonElement
 from _Framework.SliderElement import SliderElement
-from _Framework.InputControlElement import MIDI_CC_TYPE, MIDI_NOTE_TYPE
+from _Framework.EncoderElement import EncoderElement
+from _Framework.InputControlElement import MIDI_CC_TYPE
 
 # Launch Control XL - Factory Template (MIDI Channel 9)
 CHANNEL = 8  # 0-indexed (MIDI Channel 9)
-NOTE_ON_STATUS = 0x90 | CHANNEL  # NoteOn on channel 9
-
 # Knobs - Row 1: Send A
 SEND_A_CCS = [13, 14, 15, 16, 17, 18, 19, 20]
 # Knobs - Row 2: Send B
@@ -67,11 +67,9 @@ MODE_ARM = 'arm'
 LED_OFF = 12
 LED_RED_LOW = 13
 LED_RED_FULL = 15
-LED_GREEN_LOW = 28
 LED_GREEN_FULL = 60
 LED_AMBER_LOW = 29
 LED_AMBER_FULL = 63
-LED_YELLOW_FULL = 62
 
 # Closest to blue on bi-color LED: green full (blue is not available)
 LED_BLUE_APPROX = LED_GREEN_FULL  # 60 - green is the closest to blue/cyan
@@ -87,8 +85,6 @@ SKIN = {
     'track_selected': LED_AMBER_FULL,    # 63 - bright amber (stands out)
     'track_unselected': LED_RED_LOW,     # 13 - dim red (subtle)
     'no_track': LED_OFF,           # 12
-    'sends': 47,                   # send knob indicator
-    'pans': LED_GREEN_FULL,        # pan knob indicator
     'mode_active': 127,            # side button active
     'mode_inactive': LED_OFF,      # side button inactive
 }
@@ -106,7 +102,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
         with self.component_guard():
             self._setup_mixer()
             self._setup_session()
-        self._setup_device_listeners()
+            self._setup_device()
         self._add_track_listeners()
         self._update_all_leds()
         self.log_message("LaunchControlXL_SessionBox loaded")
@@ -118,49 +114,26 @@ class LaunchControlXL_SessionBox(ControlSurface):
     @staticmethod
     def _track_color_to_led(color_int):
         """Convert Ableton track color (int) to nearest LCXL bi-color LED value."""
-        # Extract RGB from Ableton's color integer
         r = (color_int >> 16) & 0xFF
         g = (color_int >> 8) & 0xFF
         b = color_int & 0xFF
-
-        # Normalize to 0-1
         r_n = r / 255.0
         g_n = g / 255.0
         b_n = b / 255.0
-
-        # Determine brightness (max of RGB)
         brightness = max(r_n, g_n, b_n)
         if brightness < 0.1:
             return LED_OFF
-
-        # Map to bi-color LED: red + green channels (0-3 each)
-        # Warm colors: use red channel
-        # Cool colors: use green channel
-        # Mix: use both
-
-        # Calculate how "red" and "green" the color is
-        # Blue contributes partially to green perception
         red_weight = r_n
-        green_weight = g_n + b_n * 0.3  # blue adds slight green
-
-        # Normalize
+        green_weight = g_n + b_n * 0.3
         max_weight = max(red_weight, green_weight, 0.01)
         red_weight = red_weight / max_weight
         green_weight = green_weight / max_weight
-
-        # Map to 0-3 LED levels
         red_level = int(round(red_weight * 3))
         green_level = int(round(green_weight * 3))
-
-        # Clamp
         red_level = max(0, min(3, red_level))
         green_level = max(0, min(3, green_level))
-
-        # At least one channel must be on
         if red_level == 0 and green_level == 0:
             green_level = 1
-
-        # velocity = 16 * green + red + 12
         return (16 * green_level) + red_level + 12
 
     # --- LED Update Methods ---
@@ -170,6 +143,15 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self._update_track_focus_leds()
         self._update_track_control_leds()
         self._update_knob_leds()
+        self._update_nav_leds()
+
+    def _update_nav_leds(self):
+        offset = self._session.track_offset()
+        num_tracks = len(self.song().visible_tracks)
+        # Left: lit if can go left
+        self._send_midi((0xB0 | CHANNEL, NAV_LEFT_CC, 127 if offset > 0 else 0))
+        # Right: lit if can go right
+        self._send_midi((0xB0 | CHANNEL, NAV_RIGHT_CC, 127 if offset + NUM_TRACKS < num_tracks else 0))
 
     def _update_side_leds(self):
         mode_map = {
@@ -235,15 +217,12 @@ class LaunchControlXL_SessionBox(ControlSurface):
             else:
                 led_color = LED_OFF
             if self._device_mode:
-                # All 3 rows show amber to indicate device control
                 device_color = LED_AMBER_FULL if track_index < len(tracks) else LED_OFF
                 self._send_sysex_led(KNOB_LED_SEND_A[i], device_color)
-                self._send_sysex_led(KNOB_LED_SEND_B[i], device_color)
-                self._send_sysex_led(KNOB_LED_PAN[i], device_color)
             else:
                 self._send_sysex_led(KNOB_LED_SEND_A[i], led_color)
-                self._send_sysex_led(KNOB_LED_SEND_B[i], led_color)
-                self._send_sysex_led(KNOB_LED_PAN[i], led_color)
+            self._send_sysex_led(KNOB_LED_SEND_B[i], led_color)
+            self._send_sysex_led(KNOB_LED_PAN[i], led_color)
 
     # --- Track State Listeners ---
 
@@ -259,10 +238,8 @@ class LaunchControlXL_SessionBox(ControlSurface):
             if not track.color_has_listener(self._on_track_color_changed):
                 track.add_color_listener(self._on_track_color_changed)
             self._track_listeners.append(track)
-        # Listen for selected track changes
         if not self.song().view.selected_track_has_listener(self._on_selected_track_changed):
             self.song().view.add_selected_track_listener(self._on_selected_track_changed)
-        # Listen for visible tracks changes (group fold/unfold)
         if not self.song().visible_tracks_has_listener(self._on_visible_tracks_changed):
             self.song().add_visible_tracks_listener(self._on_visible_tracks_changed)
 
@@ -310,14 +287,43 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self._mixer = MixerComponent(NUM_TRACKS, 2)
         self._mixer.name = 'Mixer'
 
-        # Faders -> Track Volume (only faders use framework elements)
+        # Faders -> Track Volume
         self._mixer.set_volume_controls(tuple([
             SliderElement(MIDI_CC_TYPE, CHANNEL, cc)
             for cc in FADER_CCS
         ]))
-        # Knobs (sends/pan/device) are mapped directly in build_midi_map
 
-    def _setup_device_listeners(self):
+        # Knob Row 3 -> Pan
+        self._mixer.set_pan_controls(tuple([
+            EncoderElement(MIDI_CC_TYPE, CHANNEL, cc,
+                           Live.MidiMap.MapMode.absolute)
+            for cc in PAN_CCS
+        ]))
+
+        # Store Send A encoder references for device mode switching
+        self._send_a_encoders = [
+            EncoderElement(MIDI_CC_TYPE, CHANNEL, cc, Live.MidiMap.MapMode.absolute)
+            for cc in SEND_A_CCS
+        ]
+        self._send_b_encoders = [
+            EncoderElement(MIDI_CC_TYPE, CHANNEL, cc, Live.MidiMap.MapMode.absolute)
+            for cc in SEND_B_CCS
+        ]
+
+        # Knob Row 1 -> Send A, Knob Row 2 -> Send B
+        self._assign_sends_to_mixer()
+
+    def _assign_sends_to_mixer(self):
+        for i in range(NUM_TRACKS):
+            strip = self._mixer.channel_strip(i)
+            strip.set_send_controls(tuple([
+                self._send_a_encoders[i],
+                self._send_b_encoders[i],
+            ]))
+
+    def _setup_device(self):
+        self._device = DeviceComponent()
+        self._device.name = 'Device_Control'
         self.song().view.add_selected_track_listener(self._on_device_track_changed)
 
     def _on_device_track_changed(self):
@@ -327,26 +333,44 @@ class LaunchControlXL_SessionBox(ControlSurface):
             if track and hasattr(track.view, 'selected_device_has_listener'):
                 if not track.view.selected_device_has_listener(self._on_selected_device_changed):
                     track.view.add_selected_device_listener(self._on_selected_device_changed)
-            self.request_rebuild_midi_map()
+            self._update_device_selection()
 
     def _on_selected_device_changed(self):
         if self._device_mode:
-            self.request_rebuild_midi_map()
+            self._update_device_selection()
+
+    def _update_device_selection(self):
+        track = self.song().view.selected_track
+        device = track.view.selected_device if track else None
+        with self.component_guard():
+            self._device.set_device(device)
 
     def _toggle_device_mode(self):
         self._device_mode = not self._device_mode
-        self.log_message("TOGGLE_DEVICE: mode=%s" % self._device_mode)
-        if self._device_mode:
-            # Add selected_device listener
-            track = self.song().view.selected_track
-            if track and hasattr(track.view, 'selected_device_has_listener'):
-                if not track.view.selected_device_has_listener(self._on_selected_device_changed):
-                    track.view.add_selected_device_listener(self._on_selected_device_changed)
-            self.show_message("Device Mode ON")
-        else:
-            self._remove_device_listeners()
-            self.show_message("Device Mode OFF")
-        self.request_rebuild_midi_map()
+        with self.component_guard():
+            if self._device_mode:
+                # Remove Send A from mixer strips (keep Send B only)
+                for i in range(NUM_TRACKS):
+                    strip = self._mixer.channel_strip(i)
+                    strip.set_send_controls(tuple([
+                        self._send_b_encoders[i],
+                    ]))
+                # Assign Send A encoders to device (8 params)
+                self._device.set_parameter_controls(tuple(self._send_a_encoders))
+                self._update_device_selection()
+                # Add selected_device listener
+                track = self.song().view.selected_track
+                if track and hasattr(track.view, 'selected_device_has_listener'):
+                    if not track.view.selected_device_has_listener(self._on_selected_device_changed):
+                        track.view.add_selected_device_listener(self._on_selected_device_changed)
+                self.show_message("Device Mode ON")
+            else:
+                self._remove_device_listeners()
+                self._device.set_parameter_controls(None)
+                self._device.set_device(None)
+                # Restore Send A + B to mixer
+                self._assign_sends_to_mixer()
+                self.show_message("Device Mode OFF")
         self._update_side_leds()
         self._update_knob_leds()
 
@@ -364,7 +388,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self._session.name = 'Session_Control'
         self._session.set_mixer(self._mixer)
 
-        # Navigation buttons (CC type, channel 9)
         # Up/Down: handled by SessionComponent
         self._session.set_scene_bank_up_button(
             ButtonElement(True, MIDI_CC_TYPE, CHANNEL, NAV_UP_CC))
@@ -386,54 +409,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
         for cc in [NAV_LEFT_CC, NAV_RIGHT_CC]:
             Live.MidiMap.forward_midi_cc(script_handle, midi_map_handle, CHANNEL, cc)
 
-        # Map knob CCs
-        if self._device_mode:
-            # Device mode: map to device parameters
-            track = self.song().view.selected_track
-            device = track.view.selected_device if track else None
-            self.log_message("BUILD_MAP: device_mode device=%s" % (device.name if device else "None"))
-            if device:
-                params = list(device.parameters)
-                device_ccs = SEND_A_CCS + SEND_B_CCS + PAN_CCS
-                mapped = 0
-                for i, cc in enumerate(device_ccs):
-                    if i < len(params):
-                        try:
-                            Live.MidiMap.map_midi_cc(
-                                midi_map_handle, params[i],
-                                CHANNEL, cc,
-                                Live.MidiMap.MapMode.absolute, False)
-                            mapped += 1
-                        except Exception as e:
-                            self.log_message("BUILD_MAP ERR: cc=%d param=%s err=%s" % (cc, params[i].name, str(e)))
-                self.log_message("BUILD_MAP: mapped %d/%d params" % (mapped, len(params)))
-        else:
-            # Mixer mode: map to sends and pan
-            track_offset = self._session.track_offset()
-            tracks = self.song().visible_tracks
-            for i in range(NUM_TRACKS):
-                track_index = track_offset + i
-                if track_index < len(tracks):
-                    track = tracks[track_index]
-                    md = track.mixer_device
-                    # Send A (row 1)
-                    if len(md.sends) > 0:
-                        Live.MidiMap.map_midi_cc(
-                            midi_map_handle, md.sends[0],
-                            CHANNEL, SEND_A_CCS[i],
-                            Live.MidiMap.MapMode.absolute, False)
-                    # Send B (row 2)
-                    if len(md.sends) > 1:
-                        Live.MidiMap.map_midi_cc(
-                            midi_map_handle, md.sends[1],
-                            CHANNEL, SEND_B_CCS[i],
-                            Live.MidiMap.MapMode.absolute, False)
-                    # Pan (row 3)
-                    Live.MidiMap.map_midi_cc(
-                        midi_map_handle, md.panning,
-                        CHANNEL, PAN_CCS[i],
-                        Live.MidiMap.MapMode.absolute, False)
-
         # Update LEDs after MIDI map rebuild
         self._update_all_leds()
 
@@ -444,9 +419,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
             channel = status & 0x0F
             note = midi_bytes[1]
             value = midi_bytes[2]
-            self.log_message("RX: st=%02X ch=%d n=%d v=%d dev_held=%s dev_mode=%s" % (
-                status, channel, note, value, self._device_button_held, self._device_mode))
-
             if channel == CHANNEL:
                 # Device button hold/release tracking (Note)
                 if note == SIDE_DEVICE_NOTE and (msg_type == 0x90 or msg_type == 0x80):
@@ -535,7 +507,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self.song().view.select_device(devices[idx])
         self.show_message("Device: " + devices[idx].name)
         if self._device_mode:
-            self.request_rebuild_midi_map()
+            self._update_device_selection()
 
     def _handle_track_control(self, note):
         index = TRACK_CONTROL_NOTES.index(note)
