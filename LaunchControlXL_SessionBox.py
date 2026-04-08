@@ -259,7 +259,10 @@ class LaunchControlXL_SessionBox(ControlSurface):
             self._send_sysex_led(KNOB_LED_PAN[i], led_color)
         # Column 8: Master track
         master_color = self._track_color_to_led(self.song().master_track.color)
-        self._send_sysex_led(KNOB_LED_SEND_A[7], master_color)
+        if self._device_mode:
+            self._send_sysex_led(KNOB_LED_SEND_A[7], LED_AMBER_FULL)
+        else:
+            self._send_sysex_led(KNOB_LED_SEND_A[7], master_color)
         self._send_sysex_led(KNOB_LED_SEND_B[7], master_color)
         self._send_sysex_led(KNOB_LED_PAN[7], master_color)
 
@@ -424,7 +427,13 @@ class LaunchControlXL_SessionBox(ControlSurface):
                     strip.set_send_controls(tuple([
                         self._send_b_encoders[i],
                     ]))
-                self._device.set_parameter_controls(tuple(self._send_a_encoders))
+                # Column 8: master Send A -> device parameter 8
+                master_strip = self._mixer.master_strip()
+                master_strip.set_send_controls(tuple([
+                    self._master_send_b_encoder,
+                ]))
+                device_encoders = list(self._send_a_encoders) + [self._master_send_a_encoder]
+                self._device.set_parameter_controls(tuple(device_encoders))
                 self._update_device_selection()
                 track = self.song().view.selected_track
                 if track and hasattr(track.view, 'selected_device_has_listener'):
@@ -436,6 +445,12 @@ class LaunchControlXL_SessionBox(ControlSurface):
                 self._device.set_parameter_controls(None)
                 self._device.set_device(None)
                 self._assign_sends_to_mixer()
+                # Column 8: restore master Send A + B
+                master_strip = self._mixer.master_strip()
+                master_strip.set_send_controls(tuple([
+                    self._master_send_a_encoder,
+                    self._master_send_b_encoder,
+                ]))
                 self.show_message("Device Mode OFF")
         self._update_side_leds()
         self._update_knob_leds()
