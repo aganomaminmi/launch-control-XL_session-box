@@ -105,7 +105,27 @@ class LaunchControlXL_SessionBox(ControlSurface):
             self._setup_device()
         self._add_track_listeners()
         self._update_all_leds()
+        # Toggle last group track's fold state to force Ableton session view sync
+        self.schedule_message(5, self._force_track_sync)
         self.log_message("LaunchControlXL_SessionBox loaded")
+
+    def _force_track_sync(self):
+        self._sync_tracks = []
+        for track in self.song().tracks:
+            if track.is_foldable:
+                self._sync_tracks.append((track, track.fold_state))
+                track.fold_state = not track.fold_state
+        if self._sync_tracks:
+            self.schedule_message(10, self._restore_fold_state)
+
+    def _restore_fold_state(self):
+        if hasattr(self, '_sync_tracks'):
+            for track, original_state in self._sync_tracks:
+                try:
+                    track.fold_state = original_state
+                except (RuntimeError, AttributeError):
+                    pass
+            self._sync_tracks = []
 
     def _send_sysex_led(self, index, color):
         msg = SYSEX_HEADER + (SYSEX_SET_LED, FACTORY_TEMPLATE, index, color, 247)
@@ -113,7 +133,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
 
     @staticmethod
     def _track_color_to_led(color_int):
-        """Convert Ableton track color (int) to nearest LCXL bi-color LED value."""
         r = (color_int >> 16) & 0xFF
         g = (color_int >> 8) & 0xFF
         b = color_int & 0xFF
@@ -148,9 +167,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
     def _update_nav_leds(self):
         offset = self._session.track_offset()
         num_tracks = len(self.song().visible_tracks)
-        # Left: lit if can go left
         self._send_midi((0xB0 | CHANNEL, NAV_LEFT_CC, 127 if offset > 0 else 0))
-        # Right: lit if can go right
         self._send_midi((0xB0 | CHANNEL, NAV_RIGHT_CC, 127 if offset + NUM_TRACKS < num_tracks else 0))
 
     def _update_side_leds(self):
@@ -279,6 +296,11 @@ class LaunchControlXL_SessionBox(ControlSurface):
 
     def _on_visible_tracks_changed(self):
         self._add_track_listeners()
+        num_tracks = len(self.song().visible_tracks)
+        offset = self._session.track_offset()
+        max_offset = max(0, num_tracks - NUM_TRACKS)
+        if offset > max_offset:
+            self._session.set_offsets(max_offset, self._session.scene_offset())
         self._update_all_leds()
 
     # --- Setup ---
@@ -349,16 +371,13 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self._device_mode = not self._device_mode
         with self.component_guard():
             if self._device_mode:
-                # Remove Send A from mixer strips (keep Send B only)
                 for i in range(NUM_TRACKS):
                     strip = self._mixer.channel_strip(i)
                     strip.set_send_controls(tuple([
                         self._send_b_encoders[i],
                     ]))
-                # Assign Send A encoders to device (8 params)
                 self._device.set_parameter_controls(tuple(self._send_a_encoders))
                 self._update_device_selection()
-                # Add selected_device listener
                 track = self.song().view.selected_track
                 if track and hasattr(track.view, 'selected_device_has_listener'):
                     if not track.view.selected_device_has_listener(self._on_selected_device_changed):
@@ -368,7 +387,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
                 self._remove_device_listeners()
                 self._device.set_parameter_controls(None)
                 self._device.set_device(None)
-                # Restore Send A + B to mixer
                 self._assign_sends_to_mixer()
                 self.show_message("Device Mode OFF")
         self._update_side_leds()
@@ -393,10 +411,38 @@ class LaunchControlXL_SessionBox(ControlSurface):
             ButtonElement(True, MIDI_CC_TYPE, CHANNEL, NAV_UP_CC))
         self._session.set_scene_bank_down_button(
             ButtonElement(True, MIDI_CC_TYPE, CHANNEL, NAV_DOWN_CC))
-        # Left/Right: handled manually in receive_midi (for Device+nav combo)
+
+        # Left/Right: ButtonElements with custom value listeners (for Device+nav combo)
+        self._nav_left_button = ButtonElement(True, MIDI_CC_TYPE, CHANNEL, NAV_LEFT_CC)
+        self._nav_right_button = ButtonElement(True, MIDI_CC_TYPE, CHANNEL, NAV_RIGHT_CC)
+        self._nav_left_button.add_value_listener(self._on_nav_left)
+        self._nav_right_button.add_value_listener(self._on_nav_right)
 
         # Session highlight box
         self.set_highlighting_session_component(self._session)
+
+    def _on_nav_left(self, value):
+        if value > 0:
+            if self._device_button_held:
+                self._navigate_device(-1)
+                self._device_used_as_modifier = True
+            else:
+                offset = self._session.track_offset()
+                if offset > 0:
+                    self._session.set_offsets(offset - 1, self._session.scene_offset())
+                    self._update_all_leds()
+
+    def _on_nav_right(self, value):
+        if value > 0:
+            if self._device_button_held:
+                self._navigate_device(1)
+                self._device_used_as_modifier = True
+            else:
+                offset = self._session.track_offset()
+                num_visible = len(self.song().visible_tracks)
+                if offset + NUM_TRACKS < num_visible:
+                    self._session.set_offsets(offset + 1, self._session.scene_offset())
+                    self._update_all_leds()
 
     def build_midi_map(self, midi_map_handle):
         super(LaunchControlXL_SessionBox, self).build_midi_map(midi_map_handle)
@@ -405,9 +451,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
         script_handle = self._c_instance.handle()
         for note in TRACK_FOCUS_NOTES + TRACK_CONTROL_NOTES + SIDE_NOTES:
             Live.MidiMap.forward_midi_note(script_handle, midi_map_handle, CHANNEL, note)
-        # Forward left/right nav CCs for manual handling
-        for cc in [NAV_LEFT_CC, NAV_RIGHT_CC]:
-            Live.MidiMap.forward_midi_cc(script_handle, midi_map_handle, CHANNEL, cc)
 
         # Update LEDs after MIDI map rebuild
         self._update_all_leds()
@@ -431,27 +474,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
                             self._toggle_device_mode()
                         self._device_used_as_modifier = False
                     return
-
-                # Track Select Left/Right (CC) - device nav or session nav
-                if msg_type == 0xB0 and value > 0:
-                    if note == NAV_LEFT_CC:
-                        if self._device_button_held:
-                            self._navigate_device(-1)
-                            self._device_used_as_modifier = True
-                        else:
-                            offset = self._session.track_offset()
-                            if offset > 0:
-                                self._session.set_offsets(offset - 1, self._session.scene_offset())
-                                self._update_all_leds()
-                        return
-                    elif note == NAV_RIGHT_CC:
-                        if self._device_button_held:
-                            self._navigate_device(1)
-                            self._device_used_as_modifier = True
-                        else:
-                            self._session.set_offsets(self._session.track_offset() + 1, self._session.scene_offset())
-                            self._update_all_leds()
-                        return
 
                 if msg_type == 0x90 and value > 0:
                     # Side mode buttons
@@ -532,7 +554,6 @@ class LaunchControlXL_SessionBox(ControlSurface):
         except (RuntimeError, AttributeError):
             pass
         self._remove_track_listeners()
-        # Turn off all LEDs
         for i in range(NUM_TRACKS):
             self._send_sysex_led(BTN_LED_FOCUS[i], LED_OFF)
             self._send_sysex_led(BTN_LED_CONTROL[i], LED_OFF)
