@@ -490,10 +490,8 @@ class LaunchControlXL_SessionBox(ControlSurface):
                 self._navigate_device(-1)
                 self._device_used_as_modifier = True
             else:
-                offset = self._session.track_offset()
-                if offset > 0:
-                    self._session.set_offsets(offset - 1, self._session.scene_offset())
-                    self._update_all_leds()
+                self._pending_nav = -1
+                self.schedule_message(1, self._do_nav_move)
 
     def _on_nav_right(self, value):
         if value > 0:
@@ -501,11 +499,21 @@ class LaunchControlXL_SessionBox(ControlSurface):
                 self._navigate_device(1)
                 self._device_used_as_modifier = True
             else:
-                offset = self._session.track_offset()
-                num_visible = len(self.song().visible_tracks)
-                if offset + NUM_SESSION_TRACKS < num_visible:
-                    self._session.set_offsets(offset + 1, self._session.scene_offset())
-                    self._update_all_leds()
+                self._pending_nav = 1
+                self.schedule_message(1, self._do_nav_move)
+
+    def _do_nav_move(self):
+        direction = getattr(self, '_pending_nav', 0)
+        if direction == 0:
+            return
+        self._pending_nav = 0
+        offset = self._session.track_offset()
+        num_visible = len(self.song().visible_tracks)
+        target = offset + direction
+        if target < 0 or target + NUM_SESSION_TRACKS > num_visible:
+            return
+        self._session.set_offsets(target, self._session.scene_offset())
+        self._update_all_leds()
 
     def build_midi_map(self, midi_map_handle):
         super(LaunchControlXL_SessionBox, self).build_midi_map(midi_map_handle)
