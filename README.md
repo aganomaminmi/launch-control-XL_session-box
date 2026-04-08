@@ -3,6 +3,8 @@
 Novation Launch Control XL 用の Ableton Live 12 カスタム MIDI Remote Script。
 セッションビューのハイライトボックス表示、ミキサー制御、デバイスパラメータ制御を実装。
 
+![Session View](preview.png)
+
 ## 機能
 
 ### ミキサー制御
