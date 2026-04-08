@@ -52,7 +52,7 @@ Novation Launch Control XL 用の Ableton Live 12 カスタム MIDI Remote Scrip
 ## ブランチ
 
 - `main` - 安定版（8トラック均等、DeviceComponent使用）
-- `feature/master-on-column-8` - 8列目をマスタートラックに固定（列1〜7がセッションボックス、列8は常にマスターのボリューム・Pan・Send・Solo を操作）
+- `feature/master-on-column-8` - 8列目をマスタートラックに固定（列1〜7がセッションボックス、列8は常にマスターのボリューム・Pan・Send・Solo を操作）(非安定稼働)
 - `experimental/direct-param-mapping` - 実験版（Live.MidiMap.map_midi_cc で24パラメータ直接マッピング）
 
 ## 要件
