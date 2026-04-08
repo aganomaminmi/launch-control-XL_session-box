@@ -77,7 +77,7 @@ LED_BLUE_APPROX = LED_GREEN_FULL  # 60 - green is the closest to blue/cyan
 # Skin colors per state
 SKIN = {
     'mute_on': LED_OFF,            # muted = LED off
-    'mute_off': LED_AMBER_LOW,     # 29 - not muted = lit
+    'mute_off': LED_AMBER_FULL,    # 63 - not muted = bright amber
     'solo_on': LED_BLUE_APPROX,    # 60 - soloed = green (closest to blue)
     'solo_off': LED_OFF,           # not soloed = off
     'arm_on': LED_RED_FULL,        # 15 - armed = red
