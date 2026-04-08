@@ -54,7 +54,8 @@ BTN_LED_MUTE = 41     # Mute side button
 BTN_LED_SOLO = 42     # Solo side button
 BTN_LED_ARM = 43      # Record Arm side button
 
-NUM_TRACKS = 8
+NUM_TRACKS = 8       # Physical columns on Launch Control XL
+NUM_SESSION_TRACKS = 7  # Columns 1-7 follow session box; column 8 = master
 NUM_SCENES = 1
 
 # Track Control modes
@@ -168,7 +169,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
         offset = self._session.track_offset()
         num_tracks = len(self.song().visible_tracks)
         self._send_midi((0xB0 | CHANNEL, NAV_LEFT_CC, 127 if offset > 0 else 0))
-        self._send_midi((0xB0 | CHANNEL, NAV_RIGHT_CC, 127 if offset + NUM_TRACKS < num_tracks else 0))
+        self._send_midi((0xB0 | CHANNEL, NAV_RIGHT_CC, 127 if offset + NUM_SESSION_TRACKS < num_tracks else 0))
 
     def _update_side_leds(self):
         mode_map = {
@@ -190,7 +191,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
         track_offset = self._session.track_offset()
         tracks = self.song().visible_tracks
         selected = self.song().view.selected_track
-        for i in range(NUM_TRACKS):
+        for i in range(NUM_SESSION_TRACKS):
             track_index = track_offset + i
             if track_index < len(tracks):
                 track = tracks[track_index]
@@ -200,11 +201,17 @@ class LaunchControlXL_SessionBox(ControlSurface):
                     self._send_sysex_led(BTN_LED_FOCUS[i], SKIN['track_unselected'])
             else:
                 self._send_sysex_led(BTN_LED_FOCUS[i], SKIN['no_track'])
+        # Column 8: Master track
+        master = self.song().master_track
+        if selected == master:
+            self._send_sysex_led(BTN_LED_FOCUS[7], SKIN['track_selected'])
+        else:
+            self._send_sysex_led(BTN_LED_FOCUS[7], SKIN['track_unselected'])
 
     def _update_track_control_leds(self):
         track_offset = self._session.track_offset()
         tracks = self.song().visible_tracks
-        for i in range(NUM_TRACKS):
+        for i in range(NUM_SESSION_TRACKS):
             track_index = track_offset + i
             if track_index < len(tracks):
                 track = tracks[track_index]
@@ -222,11 +229,21 @@ class LaunchControlXL_SessionBox(ControlSurface):
                         self._send_sysex_led(BTN_LED_CONTROL[i], SKIN['no_track'])
             else:
                 self._send_sysex_led(BTN_LED_CONTROL[i], SKIN['no_track'])
+        # Column 8: Master track (no arm, show mute/solo state)
+        master = self.song().master_track
+        if self._track_control_mode == MODE_MUTE:
+            # Master track doesn't have mute — show as always active
+            self._send_sysex_led(BTN_LED_CONTROL[7], SKIN['mute_off'])
+        elif self._track_control_mode == MODE_SOLO:
+            on = master.solo
+            self._send_sysex_led(BTN_LED_CONTROL[7], SKIN['solo_on'] if on else SKIN['solo_off'])
+        elif self._track_control_mode == MODE_ARM:
+            self._send_sysex_led(BTN_LED_CONTROL[7], SKIN['no_track'])
 
     def _update_knob_leds(self):
         track_offset = self._session.track_offset()
         tracks = self.song().visible_tracks
-        for i in range(NUM_TRACKS):
+        for i in range(NUM_SESSION_TRACKS):
             track_index = track_offset + i
             if track_index < len(tracks):
                 track = tracks[track_index]
@@ -240,6 +257,11 @@ class LaunchControlXL_SessionBox(ControlSurface):
                 self._send_sysex_led(KNOB_LED_SEND_A[i], led_color)
             self._send_sysex_led(KNOB_LED_SEND_B[i], led_color)
             self._send_sysex_led(KNOB_LED_PAN[i], led_color)
+        # Column 8: Master track
+        master_color = self._track_color_to_led(self.song().master_track.color)
+        self._send_sysex_led(KNOB_LED_SEND_A[7], master_color)
+        self._send_sysex_led(KNOB_LED_SEND_B[7], master_color)
+        self._send_sysex_led(KNOB_LED_PAN[7], master_color)
 
     # --- Track State Listeners ---
 
@@ -259,6 +281,9 @@ class LaunchControlXL_SessionBox(ControlSurface):
             self.song().view.add_selected_track_listener(self._on_selected_track_changed)
         if not self.song().visible_tracks_has_listener(self._on_visible_tracks_changed):
             self.song().add_visible_tracks_listener(self._on_visible_tracks_changed)
+        master = self.song().master_track
+        if not master.color_has_listener(self._on_track_color_changed):
+            master.add_color_listener(self._on_track_color_changed)
 
     def _remove_track_listeners(self):
         for track in self._track_listeners:
@@ -284,6 +309,12 @@ class LaunchControlXL_SessionBox(ControlSurface):
                 self.song().remove_visible_tracks_listener(self._on_visible_tracks_changed)
         except (RuntimeError, AttributeError):
             pass
+        try:
+            master = self.song().master_track
+            if master.color_has_listener(self._on_track_color_changed):
+                master.remove_color_listener(self._on_track_color_changed)
+        except (RuntimeError, AttributeError):
+            pass
 
     def _on_track_state_changed(self):
         self._update_track_control_leds()
@@ -298,7 +329,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self._add_track_listeners()
         num_tracks = len(self.song().visible_tracks)
         offset = self._session.track_offset()
-        max_offset = max(0, num_tracks - NUM_TRACKS)
+        max_offset = max(0, num_tracks - NUM_SESSION_TRACKS)
         if offset > max_offset:
             self._session.set_offsets(max_offset, self._session.scene_offset())
         self._update_all_leds()
@@ -306,37 +337,54 @@ class LaunchControlXL_SessionBox(ControlSurface):
     # --- Setup ---
 
     def _setup_mixer(self):
-        self._mixer = MixerComponent(NUM_TRACKS, 2)
+        self._mixer = MixerComponent(NUM_SESSION_TRACKS, 2)
         self._mixer.name = 'Mixer'
 
-        # Faders -> Track Volume
+        # Faders 1-7 -> Track Volume (session tracks)
         self._mixer.set_volume_controls(tuple([
             SliderElement(MIDI_CC_TYPE, CHANNEL, cc)
-            for cc in FADER_CCS
+            for cc in FADER_CCS[:NUM_SESSION_TRACKS]
         ]))
 
-        # Knob Row 3 -> Pan
+        # Knob Row 3, columns 1-7 -> Pan (session tracks)
         self._mixer.set_pan_controls(tuple([
             EncoderElement(MIDI_CC_TYPE, CHANNEL, cc,
                            Live.MidiMap.MapMode.absolute)
-            for cc in PAN_CCS
+            for cc in PAN_CCS[:NUM_SESSION_TRACKS]
         ]))
 
-        # Store Send A encoder references for device mode switching
+        # Store Send A/B encoder references for device mode switching (columns 1-7)
         self._send_a_encoders = [
             EncoderElement(MIDI_CC_TYPE, CHANNEL, cc, Live.MidiMap.MapMode.absolute)
-            for cc in SEND_A_CCS
+            for cc in SEND_A_CCS[:NUM_SESSION_TRACKS]
         ]
         self._send_b_encoders = [
             EncoderElement(MIDI_CC_TYPE, CHANNEL, cc, Live.MidiMap.MapMode.absolute)
-            for cc in SEND_B_CCS
+            for cc in SEND_B_CCS[:NUM_SESSION_TRACKS]
         ]
 
-        # Knob Row 1 -> Send A, Knob Row 2 -> Send B
+        # Knob Row 1 -> Send A, Knob Row 2 -> Send B (columns 1-7)
         self._assign_sends_to_mixer()
 
+        # Column 8 -> Master track
+        self._master_fader = SliderElement(MIDI_CC_TYPE, CHANNEL, FADER_CCS[7])
+        self._master_pan_encoder = EncoderElement(
+            MIDI_CC_TYPE, CHANNEL, PAN_CCS[7], Live.MidiMap.MapMode.absolute)
+        self._master_send_a_encoder = EncoderElement(
+            MIDI_CC_TYPE, CHANNEL, SEND_A_CCS[7], Live.MidiMap.MapMode.absolute)
+        self._master_send_b_encoder = EncoderElement(
+            MIDI_CC_TYPE, CHANNEL, SEND_B_CCS[7], Live.MidiMap.MapMode.absolute)
+
+        master_strip = self._mixer.master_strip()
+        master_strip.set_volume_control(self._master_fader)
+        master_strip.set_pan_control(self._master_pan_encoder)
+        master_strip.set_send_controls(tuple([
+            self._master_send_a_encoder,
+            self._master_send_b_encoder,
+        ]))
+
     def _assign_sends_to_mixer(self):
-        for i in range(NUM_TRACKS):
+        for i in range(NUM_SESSION_TRACKS):
             strip = self._mixer.channel_strip(i)
             strip.set_send_controls(tuple([
                 self._send_a_encoders[i],
@@ -371,7 +419,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self._device_mode = not self._device_mode
         with self.component_guard():
             if self._device_mode:
-                for i in range(NUM_TRACKS):
+                for i in range(NUM_SESSION_TRACKS):
                     strip = self._mixer.channel_strip(i)
                     strip.set_send_controls(tuple([
                         self._send_b_encoders[i],
@@ -402,7 +450,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
             pass
 
     def _setup_session(self):
-        self._session = SessionComponent(NUM_TRACKS, NUM_SCENES)
+        self._session = SessionComponent(NUM_SESSION_TRACKS, NUM_SCENES)
         self._session.name = 'Session_Control'
         self._session.set_mixer(self._mixer)
 
@@ -440,7 +488,7 @@ class LaunchControlXL_SessionBox(ControlSurface):
             else:
                 offset = self._session.track_offset()
                 num_visible = len(self.song().visible_tracks)
-                if offset + NUM_TRACKS < num_visible:
+                if offset + NUM_SESSION_TRACKS < num_visible:
                     self._session.set_offsets(offset + 1, self._session.scene_offset())
                     self._update_all_leds()
 
@@ -508,6 +556,11 @@ class LaunchControlXL_SessionBox(ControlSurface):
 
     def _handle_track_focus(self, note):
         index = TRACK_FOCUS_NOTES.index(note)
+        if index == 7:
+            # Column 8: select master track
+            self.song().view.selected_track = self.song().master_track
+            self._update_track_focus_leds()
+            return
         track_offset = self._session.track_offset()
         track_index = track_offset + index
         tracks = self.song().visible_tracks
@@ -533,6 +586,13 @@ class LaunchControlXL_SessionBox(ControlSurface):
 
     def _handle_track_control(self, note):
         index = TRACK_CONTROL_NOTES.index(note)
+        if index == 7:
+            # Column 8: master track (solo only, no mute/arm)
+            master = self.song().master_track
+            if self._track_control_mode == MODE_SOLO:
+                master.solo = not master.solo
+            self._update_track_control_leds()
+            return
         track_offset = self._session.track_offset()
         track_index = track_offset + index
         tracks = self.song().visible_tracks
