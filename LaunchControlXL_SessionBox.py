@@ -100,6 +100,8 @@ class LaunchControlXL_SessionBox(ControlSurface):
         self._device_button_held = False
         self._device_used_as_modifier = False
         self._track_listeners = []
+        self._focus_held_note = None
+        self._focus_is_hold = False
         with self.component_guard():
             self._setup_mixer()
             self._setup_session()
@@ -546,6 +548,13 @@ class LaunchControlXL_SessionBox(ControlSurface):
                         self._device_used_as_modifier = False
                     return
 
+                # Track Focus release (Note Off or velocity 0)
+                if note in TRACK_FOCUS_NOTES and (msg_type == 0x80 or (msg_type == 0x90 and value == 0)):
+                    if self._focus_held_note == note and not self._focus_is_hold:
+                        self._handle_track_focus(note)
+                    self._focus_held_note = None
+                    return
+
                 if msg_type == 0x90 and value > 0:
                     # Side mode buttons
                     if note == SIDE_MUTE_NOTE:
@@ -566,9 +575,11 @@ class LaunchControlXL_SessionBox(ControlSurface):
                         self._update_side_leds()
                         self._update_track_control_leds()
                         return
-                    # Track Focus (select track)
+                    # Track Focus (select track / hold to fold group)
                     elif note in TRACK_FOCUS_NOTES:
-                        self._handle_track_focus(note)
+                        self._focus_held_note = note
+                        self._focus_is_hold = False
+                        self.schedule_message(10, self._on_focus_hold_check)
                         return
                     # Track Control (mute/solo/arm)
                     elif note in TRACK_CONTROL_NOTES:
@@ -576,6 +587,24 @@ class LaunchControlXL_SessionBox(ControlSurface):
                         return
 
         super(LaunchControlXL_SessionBox, self).receive_midi(midi_bytes)
+
+    def _on_focus_hold_check(self):
+        if self._focus_held_note is None:
+            return
+        # Still held after delay -> this is a hold
+        self._focus_is_hold = True
+        index = TRACK_FOCUS_NOTES.index(self._focus_held_note)
+        if index == 7:
+            return  # Master track has no fold
+        track_offset = self._session.track_offset()
+        track_index = track_offset + index
+        tracks = self.song().visible_tracks
+        if track_index < len(tracks):
+            track = tracks[track_index]
+            if track.is_foldable:
+                track.fold_state = not track.fold_state
+                state = "Collapsed" if track.fold_state else "Expanded"
+                self.show_message(track.name + ": " + state)
 
     def _handle_track_focus(self, note):
         index = TRACK_FOCUS_NOTES.index(note)
